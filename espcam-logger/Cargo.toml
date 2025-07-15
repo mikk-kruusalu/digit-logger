@@ -32,6 +32,7 @@ embedded-hal-bus = "0.2.0"
 embedded-hal = "1.0.0"
 esp-idf-sys = "0.36.1"
 esp-idf-hal = "0.45.2"
+embedded-svc = "0.28.1"
 # espcam = { path = "local_espcam" }
 
 # --- Optional Embassy Integration ---

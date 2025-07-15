@@ -1,13 +1,11 @@
-use chrono::TimeZone;
-use esp_idf_hal::io::EspIOError;
+use embedded_svc::io::Write;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::prelude::*;
-use esp_idf_svc::http::{server::EspHttpServer, Method};
+use esp_idf_svc::http::{client::EspHttpConnection, Method};
 use esp_idf_svc::nvs;
 use esp_idf_svc::sntp;
 use esp_idf_sys::{esp_deep_sleep_start, esp_sleep_enable_timer_wakeup};
-use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -70,50 +68,61 @@ fn main() {
     )
     .unwrap();
 
-    let mut server =
-        EspHttpServer::new(&esp_idf_svc::http::server::Configuration::default()).unwrap();
+    let mut led = PinDriver::output(peripherals.pins.gpio4).unwrap();
 
-    server
-        .fn_handler("/camera.jpg", Method::Get, {
-            let led = Mutex::new(PinDriver::output(peripherals.pins.gpio4).unwrap());
-            move |request| {
-                led.lock().unwrap().set_high().unwrap();
-                camera.get_framebuffer();
-                // take two frames to get a fresh one
-                let framebuffer = camera.get_framebuffer();
+    led.set_high().unwrap();
+    camera.get_framebuffer();
+    // take two frames to get a fresh one
+    let framebuffer = camera.get_framebuffer();
 
-                if let Some(framebuffer) = framebuffer {
-                    let data = framebuffer.data();
+    if let Some(framebuffer) = framebuffer {
+        let data = framebuffer.data();
 
-                    let headers = [
-                        ("Content-Type", "image/jpeg"),
-                        ("Content-Length", &data.len().to_string()),
-                    ];
-                    let mut response = request.into_response(200, Some("OK"), &headers).unwrap();
-                    response.write(data)?;
-                } else {
-                    let mut response = request.into_ok_response()?;
-                    response.write("no framebuffer".as_bytes())?;
-                }
-                led.lock().unwrap().set_low().unwrap();
-
-                Ok::<(), EspIOError>(())
-            }
+        let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+        let headers: [(&str, &str); 2] = [
+            (
+                "Content-Type",
+                &format!("multipart/form-data; boundary={}", boundary),
+            ),
+            ("Content-Length", &data.len().to_string()),
+        ];
+        let mut http_conn = EspHttpConnection::new(&esp_idf_svc::http::client::Configuration {
+            timeout: Some(Duration::from_secs(60)),
+            buffer_size: Some(4096),
+            buffer_size_tx: Some(4096),
+            ..Default::default()
         })
         .unwrap();
+        if let Err(e) =
+            http_conn.initiate_request(Method::Post, "http://192.168.1.222:3000/upload", &headers)
+        {
+            log::warn!("Failed to initiate request: {e}");
+        } else {
+            let mut body = Vec::new();
+            let filename = dt_now.date_naive().format("%Y-%m-%d.jpg").to_string();
+            // Build multipart body
+            write!(body, "--{}\r\n", boundary).unwrap();
+            write!(
+                body,
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+                filename
+            )
+            .unwrap();
+            write!(body, "Content-Type: image/jpeg\r\n\r\n").unwrap();
+            body.extend_from_slice(data);
+            write!(body, "\r\n--{}--\r\n", boundary).unwrap();
 
-    server
-        .fn_handler("/", Method::Get, |request| {
-            let mut response = request.into_ok_response()?;
-            response.write("ok".as_bytes())?;
-            Ok::<(), EspIOError>(())
-        })
-        .unwrap();
-
-    // deep_sleep_until(dt_now + Duration::from_secs(24 * 60 * 60));
-    loop {
-        thread::sleep(Duration::from_secs(1));
+            match http_conn.write_all(&body) {
+                Ok(_) => log::info!("Uploaded file {filename}"),
+                Err(e) => log::error!("Failed to write data: {}", e),
+            };
+        }
+    } else {
+        log::info!("No framebuffer available");
     }
+    led.set_low().unwrap();
+
+    deep_sleep_until(dt_now + Duration::from_secs(24 * 60 * 60));
 }
 
 fn deep_sleep_until(target_time: chrono::DateTime<chrono::Local>) {
