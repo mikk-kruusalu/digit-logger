@@ -1,0 +1,3 @@
+[submodule "espcam-logger/components/esp32-camera"]
+	path = espcam-logger/components/esp32-camera
+	url = https://github.com/espressif/esp32-camera.git
