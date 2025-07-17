@@ -2,10 +2,12 @@ use anyhow::{bail, Result};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::peripheral,
-    sntp::{EspSntp, OperatingMode, SntpConf, SyncMode},
+    sntp::{EspSntp, OperatingMode, SntpConf, SyncMode, SyncStatus},
     wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
 };
 use log::info;
+use std::thread;
+use std::time::Duration;
 
 pub fn wifi(
     ssid: &str,
@@ -87,5 +89,11 @@ pub fn sntp(server: &str) -> Result<EspSntp> {
     let sntp = EspSntp::new(&conf)?;
 
     info!("SNTP set up!");
+
+    log::info!("Synchronising NTP...");
+    while sntp.get_sync_status() != SyncStatus::Completed {
+        thread::sleep(Duration::from_millis(100));
+    }
+
     Ok(sntp)
 }

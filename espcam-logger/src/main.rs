@@ -1,18 +1,23 @@
-use embedded_svc::io::Write;
-use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::gpio::PinDriver;
-use esp_idf_svc::hal::prelude::*;
-use esp_idf_svc::http::{client::EspHttpConnection, Method};
-use esp_idf_svc::nvs;
-use esp_idf_svc::sntp;
+use anyhow::Result;
+use embedded_svc::{http::client::Client, http::Method, io::Write};
+use esp_idf_svc::{
+    eventloop::EspSystemEventLoop, hal::gpio::PinDriver, hal::prelude::*,
+    http::client::EspHttpConnection, nvs,
+};
 use esp_idf_sys::{esp_deep_sleep_start, esp_sleep_enable_timer_wakeup};
-use std::thread;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 mod espcam;
 mod network;
 
 use espcam::Camera;
+
+#[derive(Serialize, Deserialize)]
+struct HealthRequest {
+    voltage: f32,
+    timestamp: String,
+}
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -39,13 +44,11 @@ fn main() {
         }
     };
 
-    let sntp = network::sntp("pool.ntp.org").expect("Could not set up SNTP");
-    log::info!("Synchronising NTP...");
-    while sntp.get_sync_status() != sntp::SyncStatus::Completed {
-        thread::sleep(Duration::from_millis(100));
-    }
+    network::sntp("pool.ntp.org").expect("Could not set up SNTP");
     let dt_now = chrono::Local::now();
     log::info!("Current time {dt_now}");
+
+    send_health_data(dt_now);
 
     let camera = Camera::new(
         peripherals.pins.gpio32,
@@ -74,55 +77,34 @@ fn main() {
     camera.get_framebuffer();
     // take two frames to get a fresh one
     let framebuffer = camera.get_framebuffer();
+    led.set_low().unwrap();
 
     if let Some(framebuffer) = framebuffer {
-        let data = framebuffer.data();
-
-        let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-        let headers: [(&str, &str); 2] = [
-            (
-                "Content-Type",
-                &format!("multipart/form-data; boundary={}", boundary),
-            ),
-            ("Content-Length", &data.len().to_string()),
-        ];
-        let mut http_conn = EspHttpConnection::new(&esp_idf_svc::http::client::Configuration {
-            timeout: Some(Duration::from_secs(60)),
-            buffer_size: Some(4096),
-            buffer_size_tx: Some(4096),
-            ..Default::default()
-        })
-        .unwrap();
-        if let Err(e) =
-            http_conn.initiate_request(Method::Post, "http://192.168.1.222:3000/upload", &headers)
-        {
-            log::warn!("Failed to initiate request: {e}");
-        } else {
-            let mut body = Vec::new();
-            let filename = dt_now.date_naive().format("%Y-%m-%d.jpg").to_string();
-            // Build multipart body
-            write!(body, "--{}\r\n", boundary).unwrap();
-            write!(
-                body,
-                "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-                filename
-            )
-            .unwrap();
-            write!(body, "Content-Type: image/jpeg\r\n\r\n").unwrap();
-            body.extend_from_slice(data);
-            write!(body, "\r\n--{}--\r\n", boundary).unwrap();
-
-            match http_conn.write_all(&body) {
-                Ok(_) => log::info!("Uploaded file {filename}"),
-                Err(e) => log::error!("Failed to write data: {}", e),
-            };
-        }
+        let image = framebuffer.data();
+        send_image(dt_now, image);
     } else {
         log::info!("No framebuffer available");
     }
-    led.set_low().unwrap();
 
     deep_sleep_until(dt_now + Duration::from_secs(24 * 60 * 60));
+}
+
+fn send_post_request(uri: &str, headers: &[(&str, &str)], data: &[u8]) -> Result<()> {
+    let http_conn = EspHttpConnection::new(&esp_idf_svc::http::client::Configuration {
+        timeout: Some(Duration::from_secs(60)),
+        buffer_size: Some(4096),
+        buffer_size_tx: Some(4096),
+        ..Default::default()
+    })?;
+    let mut client = Client::wrap(http_conn);
+    let mut request = client.request(Method::Post, uri, headers)?;
+    request.write_all(data)?;
+    let response = request.submit()?;
+    log::info!(
+        "Response status: {}",
+        response.status_message().unwrap_or("None")
+    );
+    Ok(())
 }
 
 fn deep_sleep_until(target_time: chrono::DateTime<chrono::Local>) {
@@ -140,5 +122,57 @@ fn deep_sleep_until(target_time: chrono::DateTime<chrono::Local>) {
         // Target time is in the past, handle accordingly
         // For example, sleep a minimal time or skip sleeping
         log::warn!("Target time is in the past, no deep sleep triggered.");
+    }
+}
+
+fn send_health_data(dt: chrono::DateTime<chrono::Local>) {
+    let health_body = serde_json::to_string(&HealthRequest {
+        voltage: 0.0,
+        timestamp: dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    })
+    .unwrap();
+    log::info!("Health request body {}", health_body);
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", &health_body.len().to_string()),
+    ];
+
+    match send_post_request(
+        "http://192.168.1.222:3000/health",
+        &headers,
+        health_body.as_bytes(),
+    ) {
+        Ok(_) => log::info!("Health request successful"),
+        Err(e) => log::error!("Failed to initiate health request: {}", e),
+    }
+}
+
+fn send_image(dt: chrono::DateTime<chrono::Local>, image: &[u8]) {
+    let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+    let mut body = Vec::new();
+    let filename = dt.format("%Y-%m-%dT%H:%M:%S.jpg").to_string();
+    // Build multipart body
+    write!(body, "--{}\r\n", boundary).unwrap();
+    write!(
+        body,
+        "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+        filename
+    )
+    .unwrap();
+    write!(body, "Content-Type: image/jpeg\r\n\r\n").unwrap();
+    body.extend_from_slice(image);
+    write!(body, "\r\n--{}--\r\n", boundary).unwrap();
+
+    let headers: [(&str, &str); 2] = [
+        (
+            "Content-Type",
+            &format!("multipart/form-data; boundary={}", boundary),
+        ),
+        ("Content-Length", &body.len().to_string()),
+    ];
+
+    match send_post_request("http://192.168.1.222:3000/upload", &headers, &body) {
+        Ok(_) => log::info!("Uploaded file {filename}"),
+        Err(e) => log::error!("Failed to upload file {filename}: {}", e),
     }
 }

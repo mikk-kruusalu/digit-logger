@@ -1,15 +1,21 @@
 use axum::{
     Router,
-    extract::Multipart,
+    extract::{Json, Multipart},
     http::StatusCode,
     routing::{get, post},
 };
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
-use tower::ServiceBuilder;
-use tower_http::cors::CorsLayer;
 
 const UPLOADS_DIRECTORY: &str = "uploads";
+const HEALTH_LOG_FILE: &str = "health.log";
+
+#[derive(Serialize, Deserialize)]
+struct HealthRequest {
+    voltage: f32,
+    timestamp: String,
+}
 
 #[tokio::main]
 async fn main() {
@@ -22,17 +28,10 @@ async fn main() {
         log::error!("Failed to create uploads directory: {e}");
     }
 
-    // build our application with a single route
     let app = Router::new()
         .route("/", get(root))
         .route("/upload", post(upload_file))
-        .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(
-            10 * 1024 * 1024,
-        ))
-        .layer(tower_http::timeout::TimeoutLayer::new(
-            std::time::Duration::from_secs(120),
-        ));
+        .route("/health", post(health));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -54,5 +53,21 @@ async fn upload_file(mut multipart: Multipart) -> StatusCode {
             file.write_all(&chunk).await.unwrap();
         }
     }
+    StatusCode::OK
+}
+
+async fn health(Json(request): Json<HealthRequest>) -> StatusCode {
+    log::info!("Got device battery voltage: {}", request.voltage);
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(HEALTH_LOG_FILE)
+        .await
+        .unwrap();
+    file.write_all(&format!("{},{}\n", request.timestamp, request.voltage).as_bytes())
+        .await
+        .unwrap();
+
     StatusCode::OK
 }
