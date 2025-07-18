@@ -1,0 +1,21 @@
+services:
+  digit-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: digit-server
+    ports:
+      - 3000:3000
+    volumes:
+      - ./data:/usr/src/digit-server/data
+    environment:
+      - RUST_LOG=trace
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: rebuild
+          path: ./src
+        - action: rebuild
+          path: ./Cargo.toml
+        - action: rebuild
+          path: ./Cargo.lock
