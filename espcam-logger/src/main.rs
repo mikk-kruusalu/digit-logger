@@ -19,6 +19,24 @@ struct HealthRequest {
     timestamp: String,
 }
 
+struct Config<'a> {
+    wifi_ssid: &'a str,
+    wifi_password: &'a str,
+    server_address: &'a str,
+    health_uri: &'a str,
+    upload_uri: &'a str,
+    wakeup_time: chrono::NaiveTime,
+}
+
+const CONFIG: Config = Config {
+    wifi_ssid: "SSID",
+    wifi_password: "PASSWORD",
+    server_address: "http://192.168.1.222:3000",
+    health_uri: "/health",
+    upload_uri: "/upload",
+    wakeup_time: chrono::NaiveTime::from_hms_opt(22, 0, 0).unwrap(),
+};
+
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
@@ -33,7 +51,12 @@ fn main() {
 
     let sysloop = EspSystemEventLoop::take().unwrap();
     // Connect to the Wi-Fi network
-    let _wifi = match network::wifi("SSID", "PASSWORD", peripherals.modem, sysloop) {
+    let _wifi = match network::wifi(
+        CONFIG.wifi_ssid,
+        CONFIG.wifi_password,
+        peripherals.modem,
+        sysloop,
+    ) {
         Ok(inner) => {
             println!("Connected to Wi-Fi network!");
             inner
@@ -81,12 +104,17 @@ fn main() {
 
     if let Some(framebuffer) = framebuffer {
         let image = framebuffer.data();
-        send_image(dt_now, image);
+        let filename = dt_now.format("%Y-%m-%dT%H:%M:%S.jpg").to_string();
+        send_image(&filename, image);
     } else {
         log::info!("No framebuffer available");
     }
 
-    deep_sleep_until(dt_now + Duration::from_secs(24 * 60 * 60));
+    deep_sleep_until(
+        (dt_now + Duration::from_secs(86400))
+            .with_time(CONFIG.wakeup_time)
+            .unwrap(),
+    );
 }
 
 fn send_post_request(uri: &str, headers: &[(&str, &str)], data: &[u8]) -> Result<()> {
@@ -113,7 +141,11 @@ fn deep_sleep_until(target_time: chrono::DateTime<chrono::Local>) {
         let sleep_duration = target_time - now; // chrono::Duration
         let sleep_us = sleep_duration.num_microseconds().unwrap_or(0) as u64;
 
-        log::info!("Deep sleeping until {}", target_time);
+        log::info!(
+            "Deep sleeping until {}, {} s",
+            target_time,
+            sleep_duration.num_seconds()
+        );
         unsafe {
             esp_sleep_enable_timer_wakeup(sleep_us);
             esp_deep_sleep_start();
@@ -138,7 +170,7 @@ fn send_health_data(dt: chrono::DateTime<chrono::Local>) {
     ];
 
     match send_post_request(
-        "http://192.168.1.222:3000/health",
+        &format!("{}{}", CONFIG.server_address, CONFIG.health_uri),
         &headers,
         health_body.as_bytes(),
     ) {
@@ -147,10 +179,9 @@ fn send_health_data(dt: chrono::DateTime<chrono::Local>) {
     }
 }
 
-fn send_image(dt: chrono::DateTime<chrono::Local>, image: &[u8]) {
+fn send_image(filename: &str, image: &[u8]) {
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
     let mut body = Vec::new();
-    let filename = dt.format("%Y-%m-%dT%H:%M:%S.jpg").to_string();
     // Build multipart body
     write!(body, "--{}\r\n", boundary).unwrap();
     write!(
@@ -171,7 +202,11 @@ fn send_image(dt: chrono::DateTime<chrono::Local>, image: &[u8]) {
         ("Content-Length", &body.len().to_string()),
     ];
 
-    match send_post_request("http://192.168.1.222:3000/upload", &headers, &body) {
+    match send_post_request(
+        &format!("{}{}", CONFIG.server_address, CONFIG.upload_uri),
+        &headers,
+        &body,
+    ) {
         Ok(_) => log::info!("Uploaded file {filename}"),
         Err(e) => log::error!("Failed to upload file {filename}: {}", e),
     }

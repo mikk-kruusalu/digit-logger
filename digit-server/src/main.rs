@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-const UPLOADS_DIRECTORY: &str = "uploads";
-const HEALTH_LOG_FILE: &str = "health.log";
+const UPLOADS_DIRECTORY: &str = "data";
+const HEALTH_LOG_FILE: &str = "data/health.log";
 
 #[derive(Serialize, Deserialize)]
 struct HealthRequest {
