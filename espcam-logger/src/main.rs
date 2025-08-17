@@ -29,49 +29,42 @@ struct Config<'a> {
 }
 
 const CONFIG: Config = Config {
-    wifi_ssid: "SSID",
-    wifi_password: "PASSWORD",
-    server_address: "http://192.168.1.222:3000",
+    wifi_ssid: "Kaneelirull",
+    wifi_password: "palunW1f1t",
+    server_address: "http://synology:3000",
     health_uri: "/health",
     upload_uri: "/upload",
     wakeup_time: chrono::NaiveTime::from_hms_opt(22, 0, 0).unwrap(),
 };
 
-fn main() {
+fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
     esp_idf_svc::sys::link_patches();
 
     // Bind the log crate to the ESP Logging facilities
-    let _logger = esp_idf_svc::log::EspLogger::initialize_default();
+    esp_idf_svc::log::EspLogger::initialize_default();
 
-    let peripherals = Peripherals::take().unwrap();
+    let peripherals = Peripherals::take()?;
 
-    nvs::EspNvsPartition::<nvs::NvsDefault>::take().unwrap();
+    nvs::EspNvsPartition::<nvs::NvsDefault>::take()?;
 
-    let sysloop = EspSystemEventLoop::take().unwrap();
+    let sysloop = EspSystemEventLoop::take()?;
     // Connect to the Wi-Fi network
-    let _wifi = match network::wifi(
+    let _wifi = network::wifi(
         CONFIG.wifi_ssid,
         CONFIG.wifi_password,
         peripherals.modem,
         sysloop,
-    ) {
-        Ok(inner) => {
-            println!("Connected to Wi-Fi network!");
-            inner
-        }
-        Err(err) => {
-            // Red!
-            panic!("Could not connect to Wi-Fi network: {:?}", err)
-        }
-    };
+    )
+    .expect("Could not connect to Wi-Fi network");
+    println!("Connected to Wi-Fi network!");
 
     network::sntp("pool.ntp.org").expect("Could not set up SNTP");
     let dt_now = chrono::Local::now();
     log::info!("Current time {dt_now}");
 
-    send_health_data(dt_now);
+    send_health_data(dt_now)?;
 
     let camera = Camera::new(
         peripherals.pins.gpio32,
@@ -91,21 +84,20 @@ fn main() {
         peripherals.pins.gpio27,
         esp_idf_sys::camera::pixformat_t_PIXFORMAT_JPEG,
         esp_idf_sys::camera::framesize_t_FRAMESIZE_UXGA,
-    )
-    .unwrap();
+    )?;
 
-    let mut led = PinDriver::output(peripherals.pins.gpio4).unwrap();
+    let mut led = PinDriver::output(peripherals.pins.gpio4)?;
 
-    led.set_high().unwrap();
+    led.set_high()?;
     camera.get_framebuffer();
     // take two frames to get a fresh one
     let framebuffer = camera.get_framebuffer();
-    led.set_low().unwrap();
+    led.set_low()?;
 
     if let Some(framebuffer) = framebuffer {
         let image = framebuffer.data();
         let filename = dt_now.format("%Y-%m-%dT%H:%M:%S.jpg").to_string();
-        send_image(&filename, image);
+        send_image(&filename, image)?;
     } else {
         log::info!("No framebuffer available");
     }
@@ -115,6 +107,8 @@ fn main() {
             .with_time(CONFIG.wakeup_time)
             .unwrap(),
     );
+
+    Ok(())
 }
 
 fn send_post_request(uri: &str, headers: &[(&str, &str)], data: &[u8]) -> Result<()> {
@@ -157,12 +151,11 @@ fn deep_sleep_until(target_time: chrono::DateTime<chrono::Local>) {
     }
 }
 
-fn send_health_data(dt: chrono::DateTime<chrono::Local>) {
+fn send_health_data(dt: chrono::DateTime<chrono::Local>) -> Result<()> {
     let health_body = serde_json::to_string(&HealthRequest {
         voltage: 0.0,
         timestamp: dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
-    })
-    .unwrap();
+    })?;
     log::info!("Health request body {}", health_body);
     let headers = [
         ("Content-Type", "application/json"),
@@ -175,24 +168,28 @@ fn send_health_data(dt: chrono::DateTime<chrono::Local>) {
         health_body.as_bytes(),
     ) {
         Ok(_) => log::info!("Health request successful"),
-        Err(e) => log::error!("Failed to initiate health request: {}", e),
+        Err(e) => {
+            log::error!("Failed to initiate health request: {}", e);
+            return Err(e);
+        }
     }
+
+    Ok(())
 }
 
-fn send_image(filename: &str, image: &[u8]) {
+fn send_image(filename: &str, image: &[u8]) -> Result<()> {
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
     let mut body = Vec::new();
     // Build multipart body
-    write!(body, "--{}\r\n", boundary).unwrap();
+    write!(body, "--{}\r\n", boundary)?;
     write!(
         body,
         "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
         filename
-    )
-    .unwrap();
-    write!(body, "Content-Type: image/jpeg\r\n\r\n").unwrap();
+    )?;
+    write!(body, "Content-Type: image/jpeg\r\n\r\n")?;
     body.extend_from_slice(image);
-    write!(body, "\r\n--{}--\r\n", boundary).unwrap();
+    write!(body, "\r\n--{}--\r\n", boundary)?;
 
     let headers: [(&str, &str); 2] = [
         (
@@ -208,6 +205,11 @@ fn send_image(filename: &str, image: &[u8]) {
         &body,
     ) {
         Ok(_) => log::info!("Uploaded file {filename}"),
-        Err(e) => log::error!("Failed to upload file {filename}: {}", e),
+        Err(e) => {
+            log::error!("Failed to upload file {filename}: {}", e);
+            return Err(e);
+        }
     }
+
+    Ok(())
 }

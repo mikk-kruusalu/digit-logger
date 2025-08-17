@@ -9,6 +9,7 @@ pub struct FrameBuffer<'a> {
     _p: PhantomData<&'a camera::camera_fb_t>,
 }
 
+#[allow(dead_code)]
 impl<'a> FrameBuffer<'a> {
     pub fn data(&self) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts((*self.fb).buf, (*self.fb).len) }
@@ -41,11 +42,13 @@ impl Drop for FrameBuffer<'_> {
     }
 }
 
+#[allow(dead_code)]
 pub struct CameraSensor<'a> {
     sensor: *mut camera::sensor_t,
     _p: PhantomData<&'a camera::sensor_t>,
 }
 
+#[allow(dead_code)]
 impl<'a> CameraSensor<'a> {
     pub fn init_status(&self) -> Result<(), EspError> {
         esp!(unsafe { (*self.sensor).init_status.unwrap()(self.sensor) })
@@ -221,6 +224,7 @@ pub struct Camera<'a> {
     _p: PhantomData<&'a ()>,
 }
 
+#[allow(dead_code)]
 impl<'a> Camera<'a> {
     pub fn new(
         pin_pwdn: impl Peripheral<P = impl InputPin + OutputPin> + 'a,
